@@ -13,14 +13,19 @@ class ForwardingPage extends StatefulWidget {
 
 class _ForwardingPage extends State<ForwardingPage> {
 
-  late Future<ServerSocket> _listenServer;
+  late final List<ServerSocket> _listenServers = [];
+
   bool _severStarted = false;
+  bool? _useRemote = false;
   int _receiveBytes = 0;
-  int _sendeBytes = 0;
-  TextEditingController? _ListenIpController;
-  TextEditingController? _ListenPortController;
-  TextEditingController? _DestIpController;
-  TextEditingController? _DestPortController;
+  int _sendBytes = 0;
+
+  TextEditingController? _listenIpController;
+  TextEditingController? _fromPortController;
+  TextEditingController? _toPortController;
+  TextEditingController? _destIpController;
+  ScrollController? _logScrollController;
+  TextEditingController? _logController;
 
   final _formKey = GlobalKey<FormState>();
 
@@ -28,10 +33,24 @@ class _ForwardingPage extends State<ForwardingPage> {
   void initState() {
     super.initState();
 
-    _ListenIpController = TextEditingController(text: '10.8.0.6');
-    _ListenPortController = TextEditingController(text: '6666');
-    _DestIpController = TextEditingController(text: '');
-    _DestPortController = TextEditingController(text: '');
+    _listenIpController = TextEditingController(text: '10.8.0.6');
+    _fromPortController = TextEditingController(text: '10000');
+    _destIpController = TextEditingController(text: '');
+    _toPortController = TextEditingController(text: '65000');
+    _logScrollController = ScrollController();
+    _logController = TextEditingController();
+  }
+
+  Future<void> _getIp() async {
+    for (var interface in await NetworkInterface.list()) {
+      for (var tAddr in interface.addresses) {
+        if (tAddr.address.startsWith('192')) {
+          setState(() {
+            _destIpController?.text = tAddr.address;
+          });
+        }
+      }
+    }
   }
 
   @override
@@ -71,16 +90,24 @@ class _ForwardingPage extends State<ForwardingPage> {
   // https://github.com/JulianAssmann/flutter_background/blob/master/example/lib/home_page.dart
   // https://gist.github.com/mgechev/5797992
   Widget _buildBody() {
+    _getIp();
+
     return Padding(
         padding: const EdgeInsets.all(8.0),
         child: Form(
           key: _formKey,
           child: Column(
             children: [
-              const Text('Listen:'),
+              const Text(
+                'Listen:',
+                style: TextStyle(
+                  fontSize: 20.0,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
               const SizedBox(height: 20),
               TextFormField(
-                controller: _ListenIpController,
+                controller: _listenIpController,
                 autovalidateMode: AutovalidateMode.always,
                 validator: (str) => isValidHost(str) ? null : 'Invalid ip/hostname listen',
                 decoration: const InputDecoration(
@@ -88,20 +115,47 @@ class _ForwardingPage extends State<ForwardingPage> {
                   hintText: 'Enter the address here, e.g. 10.0.2.2 for listen',
                 )
               ),
+              const SizedBox(height: 20),
+              const Text('Port from/to:', style: TextStyle(
+                fontSize: 20.0,
+                fontWeight: FontWeight.bold,
+              )),
               TextFormField(
-                controller: _ListenPortController,
+                controller: _fromPortController,
                 autovalidateMode: AutovalidateMode.always,
-                validator: (str) => isValidPort(str) ? null : 'Invalid port listen',
+                validator: (str) => isValidPort(str) ? null : 'Invalid port from',
                 decoration: const InputDecoration(
                   helperText: 'The port the TCP server is listening on',
-                  hintText: 'Enter the port here, e. g. 6666 for listen',
+                  hintText: 'Enter the port here, e. g. 10000 for from',
                 ),
               ),
+              TextFormField(
+                controller: _toPortController,
+                autovalidateMode: AutovalidateMode.always,
+                validator: (str) => isValidPort(str) ? null : 'Invalid port to',
+                decoration: const InputDecoration(
+                  helperText: 'The port the TCP client is connect on',
+                  hintText: 'Enter the port here, e. g. 80000 for to',
+                ),
+                enabled: _useRemote == false,
+              ),
+              CheckboxListTile(
+                value: _useRemote,
+                onChanged: (bool? value) {
+                  setState(() {
+                    _useRemote = value;
+                  });
+                },
+                title: const Text('Enable remote listen start for port forwarding'),
+                ),
               const SizedBox(height: 20),
-              const Text('Destination:'),
+              const Text('Destination:', style: TextStyle(
+                fontSize: 20.0,
+                fontWeight: FontWeight.bold,
+              )),
               const SizedBox(height: 20),
               TextFormField(
-                  controller: _DestIpController,
+                  controller: _destIpController,
                   autovalidateMode: AutovalidateMode.always,
                   validator: (str) => isValidHost(str) ? null : 'Invalid ip/hostname destination',
                   decoration: const InputDecoration(
@@ -109,20 +163,14 @@ class _ForwardingPage extends State<ForwardingPage> {
                     hintText: 'Enter the address here, e.g. 10.0.2.2 for destination',
                   )
               ),
-              TextFormField(
-                controller: _DestPortController,
-                autovalidateMode: AutovalidateMode.always,
-                validator: (str) => isValidPort(str) ? null : 'Invalid port destination',
-                decoration: const InputDecoration(
-                  helperText: 'The port the TCP client is connect on',
-                  hintText: 'Enter the port here, e. g. 6666 for destination',
-                ),
-              ),
               const SizedBox(height: 20),
               ElevatedButton(
                   child: _severStarted ? const Text('Stop') : const Text('Start'),
                   onPressed: () {
                     if (_severStarted) {
+                      _addLog("Stop listen ...");
+                      _stopForwarding();
+
                       if (kDebugMode) {
                         print('Stop ...');
                       }
@@ -134,12 +182,16 @@ class _ForwardingPage extends State<ForwardingPage> {
                     }
 
                     if (_formKey.currentState!.validate()) {
-                      _startForwarding(
-                        _ListenIpController!.text,
-                        int.parse(_ListenPortController!.text),
-                        _DestIpController!.text,
-                        int.parse(_DestPortController!.text),
-                      );
+                      if (!_severStarted) {
+                        _startForwarding(
+                          _listenIpController!.text,
+                          _destIpController!.text,
+                          int.parse(_fromPortController!.text),
+                          int.parse(_toPortController!.text),
+                        );
+                      }
+                    } else {
+                      _addLog("Invalidate, please check your settings!");
                     }
                   }
                 ),
@@ -147,27 +199,55 @@ class _ForwardingPage extends State<ForwardingPage> {
               const SizedBox(height: 20),
               Text('Receive-bytes: $_receiveBytes'),
               const SizedBox(height: 2),
-              Text('Send-bytes: $_sendeBytes'),
+              Text('Send-bytes: $_sendBytes'),
+              const SizedBox(height: 20),
+              TextField(
+                scrollController: _logScrollController,
+                controller: _logController,
+                keyboardType: TextInputType.multiline,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                    hintText: "Logs ...",
+                    focusedBorder: OutlineInputBorder(
+                        borderSide: BorderSide(width: 1, color: Colors.redAccent)
+                    )
+                ),
+
+              )
             ]
           )
         )
     );
   }
 
-  Future<void> _startForwarding(String listenHost, int listenPort, String destHost, int destPort) async {
-    _listenServer = ServerSocket.bind(listenHost, listenPort);
-    _listenServer.then((ServerSocket server) {
+  void _addLog(String log) {
+    setState(() {
+      _logController?.text = "${_logController?.text}\r\n$log";
+
+      final logScrollController = _logScrollController;
+
+      if (logScrollController != null) {
+        logScrollController.jumpTo(logScrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  Future<void> _openForwardingServer(String listenHost, int listPort, String destHost) async {
+    try {
+      _addLog("Bind listen: $listenHost:$listPort");
+
+      ServerSocket server = await ServerSocket.bind(listenHost, listPort);
       server.listen((Socket serverSocket) async {
-        Socket clientSocket = await Socket.connect(destHost, destPort);
+        Socket clientSocket = await Socket.connect(destHost, server.port);
         clientSocket.listen(
-            (data) {
+                (data) {
               setState(() {
                 _receiveBytes += data.length;
               });
 
               try {
                 serverSocket.add(data);
-              } catch(ex) {
+              } catch (ex) {
                 if (kDebugMode) {
                   print('clientSocket.listen: Exception write');
                   print(ex);
@@ -179,21 +259,23 @@ class _ForwardingPage extends State<ForwardingPage> {
                 print(data);
               }
             },
-            onError: (error, StackTrace trace) async => {
+            onError: (error, StackTrace trace) async =>
+            {
             },
             cancelOnError: true
         );
 
         serverSocket.listen((List<int> data) {
           setState(() {
-            _sendeBytes += data.length;
+            _sendBytes += data.length;
           });
 
           try {
             clientSocket.add(data);
-          } catch(ex) {
+          } catch (ex) {
             if (kDebugMode) {
-              print('_startForwarding::serverSocket.listen: Exception write');
+              print(
+                  '_startForwarding::serverSocket.listen: Exception write');
               print(ex);
             }
           }
@@ -204,11 +286,118 @@ class _ForwardingPage extends State<ForwardingPage> {
           }
         });
       });
-    });
+
+      _listenServers.add(server);
+    } catch (e) {
+      _addLog('Can not bind the listen to: $listenHost:$listPort');
+    }
+  }
+
+  /// _startForwarding
+  Future<void> _startForwarding(String listenHost, String destHost, int fromPort, int toPort) async {
+    _receiveBytes = 0;
+    _sendBytes = 0;
+
+    _addLog("Start listen ...");
 
     setState(() {
       _severStarted = true;
     });
+
+    if (_useRemote == true) {
+      _addLog("Start remote port forwarding listen ...");
+
+      final server = await HttpServer.bind(InternetAddress.anyIPv4, fromPort);
+      server.listen((request) async {
+        _addLog('Request from: ${request.connectionInfo?.remoteAddress}');
+
+        if (request.method == 'GET') {
+          var pUri = Uri.parse(request.uri.toString());
+
+          if (pUri.queryParameters.containsKey('action')) {
+            var action = pUri.queryParameters['action'];
+
+            switch (action) {
+              case 'open_port':
+                if (pUri.queryParameters.containsKey('port')) {
+                  var portNum = int.parse(pUri.queryParameters['port']!);
+
+                  _openForwardingServer(listenHost, portNum, destHost);
+
+                  request.response.write('Port is open!');
+                  request.response.close();
+                  return;
+                }
+                break;
+
+              case 'close_port':
+                if (pUri.queryParameters.containsKey('port')) {
+                  var portNum = int.parse(pUri.queryParameters['port']!);
+
+                  for (var i = 0; i < _listenServers.length; i++) {
+                    var isClose = false;
+
+                    var server = _listenServers[i];
+
+                    if (server.port == portNum) {
+                      server.close();
+                      isClose = true;
+                    }
+
+                    if (isClose) {
+                      _listenServers.removeAt(i);
+                      request.response.write('Port is close!');
+                      request.response.close();
+                      return;
+                    }
+                  }
+                }
+                break;
+
+              case 'info':
+
+                request.response.write('Listen-IP: $listenHost \r\n');
+                request.response.write('Destination-IP: $destHost \r\n');
+                request.response.write('Receive-bytes: $_receiveBytes \r\n');
+                request.response.write('Send-bytes: $_sendBytes \r\n');
+                request.response.write('\r\n');
+                request.response.write('Open-Ports:\r\n');
+
+                var ports = "";
+
+                for (var i = 0; i < _listenServers.length; i++) {
+                  ports += '${_listenServers[i].port}\r\n';
+                }
+
+                request.response.write('$ports\r\n');
+
+                request.response.close();
+                return;
+            }
+          }
+        }
+
+        request.response.statusCode = 404;
+        request.response.close();
+        return;
+      });
+    } else {
+      for (int i = fromPort; i <= toPort; i++) {
+        _openForwardingServer(listenHost, i, destHost);
+      }
+    }
   }
 
+  /// _stopForwarding
+  Future<void> _stopForwarding() async {
+    _listenServers.map((server) {
+      server.close();
+    });
+
+    _listenServers.clear();
+
+    setState(() {
+      _severStarted = false;
+    });
+  }
 }
