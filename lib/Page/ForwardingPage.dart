@@ -19,6 +19,7 @@ class _ForwardingPage extends State<ForwardingPage> {
   bool? _useRemote = false;
   int _receiveBytes = 0;
   int _sendBytes = 0;
+  List<String> ipList = [];
 
   TextEditingController? _listenIpController;
   TextEditingController? _fromPortController;
@@ -42,8 +43,14 @@ class _ForwardingPage extends State<ForwardingPage> {
   }
 
   Future<void> _getIp() async {
+    ipList.clear();
+
     for (var interface in await NetworkInterface.list()) {
       for (var tAddr in interface.addresses) {
+        setState(() {
+          ipList.add(tAddr.address);
+        });
+
         if (tAddr.address.startsWith('192')) {
           setState(() {
             _destIpController?.text = tAddr.address;
@@ -87,10 +94,29 @@ class _ForwardingPage extends State<ForwardingPage> {
     return regex.hasMatch(str);
   }
 
+  Future<List<DropdownMenuItem<String>>> get ipItems async {
+    List<DropdownMenuItem<String>> menuItems = [];
+
+    for (var interface in await NetworkInterface.list()) {
+      for (var addr in interface.addresses) {
+        menuItems.add(
+            DropdownMenuItem(
+                value: addr.address,
+                child: Text(addr.address))
+        );
+      }
+    }
+
+    return menuItems;
+  }
+
   // https://github.com/JulianAssmann/flutter_background/blob/master/example/lib/home_page.dart
   // https://gist.github.com/mgechev/5797992
   Widget _buildBody() {
-    _getIp();
+
+    Future.delayed(Duration.zero, () async {
+      await _getIp();
+    });
 
     return Padding(
         padding: const EdgeInsets.all(8.0),
@@ -154,7 +180,7 @@ class _ForwardingPage extends State<ForwardingPage> {
                 fontWeight: FontWeight.bold,
               )),
               const SizedBox(height: 20),
-              TextFormField(
+              /*TextFormField(
                   controller: _destIpController,
                   autovalidateMode: AutovalidateMode.always,
                   validator: (str) => isValidHost(str) ? null : 'Invalid ip/hostname destination',
@@ -162,6 +188,22 @@ class _ForwardingPage extends State<ForwardingPage> {
                     helperText: 'The IP address or hostname of the TCP destination',
                     hintText: 'Enter the address here, e.g. 10.0.2.2 for destination',
                   )
+              ),*/
+              DropdownButton(
+                value: _destIpController?.text,
+                items: ipList.map((ip){
+                  return DropdownMenuItem(
+                      value: ip,
+                      child: Text(ip)
+                  );
+                }).toList(),
+                onChanged: (value) {
+                  if (value != null && (value is String)) {
+                    setState(() {
+                      _destIpController?.text = value;
+                    });
+                  }
+                },
               ),
               const SizedBox(height: 20),
               ElevatedButton(
@@ -305,9 +347,9 @@ class _ForwardingPage extends State<ForwardingPage> {
     });
 
     if (_useRemote == true) {
-      _addLog("Start remote port forwarding listen ...");
+      _addLog("Start remote port forwarding listen on: $listenHost:$fromPort");
 
-      final server = await HttpServer.bind(InternetAddress.anyIPv4, fromPort);
+      final server = await HttpServer.bind(listenHost, fromPort);
       server.listen((request) async {
         _addLog('Request from: ${request.connectionInfo?.remoteAddress}');
 
